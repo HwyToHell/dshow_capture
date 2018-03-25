@@ -1,0 +1,28 @@
+# Compiled Object files
+*.obj
+
+# Precompiled Headers
+ipch/
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Executables
+*.exe
+
+# Bitmaps
+*.bmp
+
+# VC files and directories
+*.pdb
+*.opensdf
+*.sdf
+*.sln
+*.suo
+*.vcproj
+*.vcxproj*
+**Release/
+**Debug/
+

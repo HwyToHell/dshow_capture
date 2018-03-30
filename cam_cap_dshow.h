@@ -6,13 +6,17 @@
 #include <string>
 #include <vector>
 #include <DShow.h>
+#include <opencv2/opencv.hpp>
 #include "qedit.h" // sample grabber
 
-// TODO delete enum and include opencv
+/* TODO delete enum and include opencv
 enum {
 	CV_CAP_PROP_FRAME_WIDTH    =3,
     CV_CAP_PROP_FRAME_HEIGHT   =4,
 };
+*/
+
+void cpyFlipHori(BYTE dst[], const BYTE src[], long height, long width, int nByteDepth);
 
 struct CamDevice { 
 	std::wstring name;
@@ -61,7 +65,7 @@ public:
 	double get(int propID);
 	bool initGraph(int capDeviceNum);
 	void printStreamCaps();
-	bool read(BYTE* bitmap);
+	bool read(cv::Mat& bitmap);
 	bool runGraph();
 	bool setResolution(int capabilityID);
 	bool stopGraph();

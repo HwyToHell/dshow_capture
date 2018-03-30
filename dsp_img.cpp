@@ -1,16 +1,27 @@
-// google-style order
 #include "cam_cap_dshow.h"
 
 #include <iostream>
 #include <process.h> // threading
-#include <string>
-
-void showImg(void* p);
 
 
-void createImg(cv::Scalar color, int width, int height) {
-	for (int i = 0; i < width; ++i) 
-		;
+
+void showImg(void* p) {
+	CamInput* pCamInput = (CamInput*)p;
+	cv::Mat image;
+
+	Sleep(2000);
+	while (pCamInput->read(image)) {
+		//bool succ = pCamInput->read(image);
+		cv::imshow("grabbed image", image);
+		//cv::imwrite("yyy_grab.jpg", image);
+
+		if (cv::waitKey(10) == 27) 	{
+			std::cout << "ESC pressed -> end video processing" << std::endl;
+			break;
+		}
+	}
+
+	_endthread();
 	return;
 }
 
@@ -43,8 +54,6 @@ void startStopCtrl(void* p) {
 		if (cmd.size() > 0 && cmd.front() == 'e')
 			exit = true;
 	} // end while
-
-//	_endthread();
 }
 
 
@@ -79,31 +88,11 @@ void getCam(void* p) {
 }
 
 
-void showImg(void* p) {
-	CamInput* pCamInput = (CamInput*)p;
-	Sleep(2000);
-	
-	cv::Mat image;
-	while (pCamInput->read(image)) {
-		//bool succ = pCamInput->read(image);
-		cv::imshow("grabbed image", image);
-		//cv::imwrite("yyy_grab.jpg", image);
 
-		if (cv::waitKey(10) == 27) 	{
-			std::cout << "ESC pressed -> end video processing" << std::endl;
-			break;
-		}
-	}
-
-	_endthread();
-	return;
-}
-
-
-int main (int argc, char* argv[]) {
+int alt_main (int argc, char* argv[]) {
 	using namespace std;
-	/* dyn array for grabbed images (RGB24)
-	cv::Mat sgColorImg(16, 4, CV_8UC3, cv::Scalar(255, 255, 0));
+	/*// dyn array for grabbed images (RGB24)
+	cv::Mat sgColorImg(16, 4, CV_8UC3, cv::Scalar(0, 0, 255));
 	cout << "sgColorImg" << endl;
 	cout << sgColorImg << endl << endl;
 	cv::imshow("single color image", sgColorImg);
@@ -111,8 +100,10 @@ int main (int argc, char* argv[]) {
 	cv::Mat image = cv::imread("yyy_grab.jpg");
 	cv::imshow("grabbed frame", image);
 
-
 	_beginthread(getCam, 0, nullptr);
+
+
+
 
 	cv::waitKey(0);
 	return 0;

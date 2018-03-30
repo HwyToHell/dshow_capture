@@ -32,20 +32,19 @@ bool removeFromRot(DWORD dwRegister);
 
 class SampleGrabberCallback : public ISampleGrabberCB {
 private:
-	ULONG m_cntRef;
-	BYTE* m_bitmap; // TODO provide this bitmap array from cv application
-	BYTE* m_bufferMediaSample;
+	ULONG	m_cntRef;
+	BYTE*	m_bitmap; // TODO provide this bitmap array from cv application
+	long	m_height;
+	long	m_width;
+	int		m_depth;
+	BYTE*	m_bufferMediaSample;
 
-	struct Sample {
-		long long time;
-		BYTE bitmap[640*480*3];
-	};
-	std::vector<Sample> m_sampleList;
 	LARGE_INTEGER m_lastTime;
 	
 	int m_counter;
-	long long m_sumTime;
-	long long m_avgTime;
+	long long m_avgTime, m_sumTime;
+	long long m_avgCpy, m_sumCpy;
+	CRITICAL_SECTION m_lockBufferCopy;
 
 
 public:
@@ -57,16 +56,20 @@ public:
 
 	STDMETHODIMP BufferCB(double SampleTime, BYTE* pBuffer, long BufferLen);
 	STDMETHODIMP SampleCB(double SampleTime, IMediaSample* pSample);
-	bool setBitmapSize(size_t bitmapSize);
+	BYTE* getBitmap();
+	bool setBitmapSize(long height, long width, int nByteDepth);
 };
 
 SampleGrabberCallback::SampleGrabberCallback() {
 	m_counter = 0;
 	m_avgTime = m_sumTime = 0;
+	m_avgCpy = m_sumCpy = 0;
+	InitializeCriticalSection(&m_lockBufferCopy);
 }
 
 SampleGrabberCallback::~SampleGrabberCallback() {
 	delete[] m_bitmap;
+	DeleteCriticalSection(&m_lockBufferCopy);
 }
 
 ULONG STDMETHODCALLTYPE SampleGrabberCallback::AddRef() {
@@ -101,6 +104,21 @@ STDMETHODIMP SampleGrabberCallback::BufferCB(double SampleTime, BYTE* pBuffer, l
 
 STDMETHODIMP SampleGrabberCallback::SampleCB(double SampleTime, IMediaSample* pSample) {
 	using namespace std;
+	
+	// performance counting
+	LARGE_INTEGER lBefore, lAfter, lNewTime, lMicroSecElapsed;
+	LARGE_INTEGER lFrequency;
+
+	// microsec since last callback
+	BOOL success = QueryPerformanceFrequency(&lFrequency);
+	success = QueryPerformanceCounter(&lNewTime);
+
+	lMicroSecElapsed.QuadPart = lNewTime.QuadPart - m_lastTime.QuadPart;
+	lMicroSecElapsed.QuadPart *= 1000000; 		// ticks per second
+	lMicroSecElapsed.QuadPart /= lFrequency.QuadPart;
+	m_lastTime = lNewTime;
+
+	success = QueryPerformanceCounter(&lBefore);
 
 	// copy pixels
 	long bufferSize = 0;
@@ -111,42 +129,66 @@ STDMETHODIMP SampleGrabberCallback::SampleCB(double SampleTime, IMediaSample* pS
     } else {
 		bufferSize = pSample->GetSize();
 	}
-	memcpy(m_bitmap, m_bufferMediaSample, bufferSize);
 
-	// performance counting
-	LARGE_INTEGER lNewTime, lMicroSecElapsed;
-	LARGE_INTEGER lFrequency;
+	EnterCriticalSection(&m_lockBufferCopy);
+	//memcpy(m_bitmap, m_bufferMediaSample, bufferSize);
+	// flip horizontally
+	cpyFlipHori(m_bitmap, m_bufferMediaSample, m_height, m_width, m_depth);
+	LeaveCriticalSection(&m_lockBufferCopy);
 
-	// microsec since last callback
-	BOOL success = QueryPerformanceFrequency(&lFrequency);
-	success = QueryPerformanceCounter(&lNewTime);
-	lMicroSecElapsed.QuadPart = lNewTime.QuadPart - m_lastTime.QuadPart;
-	lMicroSecElapsed.QuadPart *= 1000000; 		// ticks per second
-	lMicroSecElapsed.QuadPart /= lFrequency.QuadPart;
-	m_lastTime = lNewTime;
+	success = QueryPerformanceCounter(&lAfter);
+	long long lDiff = (lAfter.QuadPart - lBefore.QuadPart) * 1000000 / lFrequency.QuadPart;
 
-	// DEBUG printout average sample time
 	++m_counter;
+	// DEBUG printout time measurements
 	if (m_counter > 1) {
+
+		// sample time for grabber
 		m_sumTime += lMicroSecElapsed.QuadPart;
 		m_avgTime = m_sumTime / m_counter;
+
+		// time for copying frame buffer
+		m_sumCpy += lDiff;
+		m_avgCpy = m_sumCpy / m_counter;
 	}
+
 	if (m_counter % 100 == 0) {
-		cout << "average time in ms: " << m_avgTime / 1000 << " presentation time: " << SampleTime << endl;
+		cout << "average sample time in ms: " << (double)m_avgTime / 1000 
+			<< " presentation time: " << SampleTime << endl;
+		cout << "time to copy frame buffer in ms: " << (double)m_avgCpy / 1000 << endl;
 		cout << "bufferSize: " << bufferSize << endl;
 	}
-
-
 
 	return 0;
 }
 
-bool SampleGrabberCallback::setBitmapSize(size_t bitmapSize) {
-	m_bitmap = new BYTE[bitmapSize];
-	return true;
+BYTE* SampleGrabberCallback::getBitmap() {
+	return m_bitmap;
 }
 
+bool SampleGrabberCallback::setBitmapSize(long height, long width, int nByteDepth) {
+	if (height <= 0 || width <= 0 || nByteDepth <= 0)
+		return false;
+	else {
+		m_height = height;
+		m_width = width;
+		m_depth = nByteDepth;
+		int bitmapSize = height * width * nByteDepth;
+		m_bitmap = new BYTE[bitmapSize];
+		return true;
+	}
+}
 
+void cpyFlipHori(BYTE dst[], const BYTE src[], long height, long width, int nByteDepth) {
+	long rowLen = width * nByteDepth;
+	for (long i_row = 0; i_row < height; ++i_row) {
+		for (long n_col = 0;  n_col < rowLen; ++n_col) {
+			int dst_idx = i_row * rowLen + n_col;
+			int src_idx = (height - i_row - 1) * rowLen + n_col;
+			dst[dst_idx] = src[src_idx];
+		}
+	}
+}
 
 CamInput::CamInput() {
 	using namespace std;
@@ -566,9 +608,6 @@ bool CamInput::initGraph(int capDeviceNum) {
 	//m_videoWindow->put_Right(0);
 	//m_videoWindow->put_Bottom(0);
 	m_videoWindow->put_Caption(L"Video Window");
-
-
-
 	
 	// TODO delete after debugging
 	DWORD pdwRegister = 0;
@@ -584,6 +623,19 @@ void CamInput::printStreamCaps() {
 		int height = m_streamCapsArray.at(n).bmiHeader.biHeight;
 		cout << n << " resolution: " << width << "x" << height << endl;
 	}
+}
+
+
+bool CamInput::read(cv::Mat& bitmap) {
+	using namespace cv;
+	int width = (int)get(CV_CAP_PROP_FRAME_WIDTH);
+	int height = (int)get(CV_CAP_PROP_FRAME_HEIGHT);
+	
+	BYTE* buffer = m_sGrabCallBack->getBitmap();
+	Mat image(height, width, CV_8UC3, buffer);
+	
+	image.copyTo(bitmap);
+	return true;
 }
 
 bool CamInput::runGraph() {
@@ -623,8 +675,8 @@ bool CamInput::setResolution(int capabilityID) {
 	// update bitmap buffer length in sample grabber callback
 	long width = m_streamCapsArray.at(capabilityID).bmiHeader.biWidth;
 	long height = m_streamCapsArray.at(capabilityID).bmiHeader.biHeight;
-	size_t bitmapSize = width * height * 3;
-	m_sGrabCallBack->setBitmapSize(bitmapSize);
+	int nByteDepth = 3; // RGB
+	m_sGrabCallBack->setBitmapSize(height, width, nByteDepth);
 
 	pStreamCfg->Release();
 	return true;

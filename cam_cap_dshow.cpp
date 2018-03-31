@@ -45,7 +45,7 @@ private:
 	long long m_avgTime, m_sumTime;
 	long long m_avgCpy, m_sumCpy;
 	CRITICAL_SECTION m_lockBufferCopy;
-
+	HANDLE m_newFrameEvent;
 
 public:
 	SampleGrabberCallback();
@@ -57,6 +57,7 @@ public:
 	STDMETHODIMP BufferCB(double SampleTime, BYTE* pBuffer, long BufferLen);
 	STDMETHODIMP SampleCB(double SampleTime, IMediaSample* pSample);
 	BYTE* getBitmap();
+	HANDLE getNewFrameEventHandle();
 	bool setBitmapSize(long height, long width, int nByteDepth);
 };
 
@@ -65,11 +66,13 @@ SampleGrabberCallback::SampleGrabberCallback() {
 	m_avgTime = m_sumTime = 0;
 	m_avgCpy = m_sumCpy = 0;
 	InitializeCriticalSection(&m_lockBufferCopy);
+	m_newFrameEvent = CreateEvent(nullptr, true, false, L"new frame");
 }
 
 SampleGrabberCallback::~SampleGrabberCallback() {
 	delete[] m_bitmap;
 	DeleteCriticalSection(&m_lockBufferCopy);
+	CloseHandle(m_newFrameEvent);
 }
 
 ULONG STDMETHODCALLTYPE SampleGrabberCallback::AddRef() {
@@ -133,8 +136,9 @@ STDMETHODIMP SampleGrabberCallback::SampleCB(double SampleTime, IMediaSample* pS
 	EnterCriticalSection(&m_lockBufferCopy);
 	//memcpy(m_bitmap, m_bufferMediaSample, bufferSize);
 	// flip horizontally
-	cpyFlipHori(m_bitmap, m_bufferMediaSample, m_height, m_width, m_depth);
+	cpyFlipHori(m_bitmap, m_bufferMediaSample, (int)m_height, (int)m_width, m_depth);
 	LeaveCriticalSection(&m_lockBufferCopy);
+	SetEvent(m_newFrameEvent);
 
 	success = QueryPerformanceCounter(&lAfter);
 	long long lDiff = (lAfter.QuadPart - lBefore.QuadPart) * 1000000 / lFrequency.QuadPart;
@@ -166,6 +170,10 @@ BYTE* SampleGrabberCallback::getBitmap() {
 	return m_bitmap;
 }
 
+HANDLE SampleGrabberCallback::getNewFrameEventHandle() {
+	return m_newFrameEvent;
+}
+
 bool SampleGrabberCallback::setBitmapSize(long height, long width, int nByteDepth) {
 	if (height <= 0 || width <= 0 || nByteDepth <= 0)
 		return false;
@@ -179,7 +187,8 @@ bool SampleGrabberCallback::setBitmapSize(long height, long width, int nByteDept
 	}
 }
 
-void cpyFlipHori(BYTE dst[], const BYTE src[], long height, long width, int nByteDepth) {
+// TODO: delete
+void cpyFlipHori_slow(BYTE dst[], const BYTE src[], long height, long width, int nByteDepth) {
 	long rowLen = width * nByteDepth;
 	for (long i_row = 0; i_row < height; ++i_row) {
 		for (long n_col = 0;  n_col < rowLen; ++n_col) {
@@ -188,7 +197,17 @@ void cpyFlipHori(BYTE dst[], const BYTE src[], long height, long width, int nByt
 			dst[dst_idx] = src[src_idx];
 		}
 	}
+	return;
 }
+
+void cpyFlipHori(BYTE dst[], const BYTE src[], int height, int width, int nByteDepth) {
+	int rowLen = width * nByteDepth;
+	for (int i_row = 0; i_row < height; ++i_row) {
+		memcpy(&dst[i_row * rowLen], &src[(height - i_row - 1) * rowLen], rowLen);
+	}
+	return;
+}
+
 
 CamInput::CamInput() {
 	using namespace std;
@@ -628,14 +647,36 @@ void CamInput::printStreamCaps() {
 
 bool CamInput::read(cv::Mat& bitmap) {
 	using namespace cv;
+	using namespace std;
 	int width = (int)get(CV_CAP_PROP_FRAME_WIDTH);
 	int height = (int)get(CV_CAP_PROP_FRAME_HEIGHT);
+
+	// wait max 200ms (=5 fps) for new frame
+	HANDLE hNewFrameEvent = m_sGrabCallBack->getNewFrameEventHandle();
+	DWORD dwStatus = WaitForSingleObject(hNewFrameEvent, 200); 
+
+	// assign buffer to mat if new frame available
+	if (dwStatus == WAIT_OBJECT_0) {
+		BYTE* buffer = m_sGrabCallBack->getBitmap();
+		Mat image(height, width, CV_8UC3, buffer);
+		image.copyTo(bitmap);
+		if (ResetEvent(hNewFrameEvent))
+			return true;
+		else {
+			cerr << "read: cannot reset new frame event" << endl;
+			return false;
+		}
+
+	// return false if timed out
+	} else if (dwStatus == WAIT_TIMEOUT) {
+		cout << "read: no new frames available anymore" << endl;
+		return false;
 	
-	BYTE* buffer = m_sGrabCallBack->getBitmap();
-	Mat image(height, width, CV_8UC3, buffer);
-	
-	image.copyTo(bitmap);
-	return true;
+	// error message otherwise
+	} else {
+		cerr << "read: error on waiting for event" << endl;
+		return false;
+	}
 }
 
 bool CamInput::runGraph() {

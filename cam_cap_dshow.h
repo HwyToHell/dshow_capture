@@ -16,7 +16,7 @@ enum {
 };
 */
 
-void cpyFlipHori(BYTE dst[], const BYTE src[], long height, long width, int nByteDepth);
+void cpyFlipHori(BYTE dst[], const BYTE src[], int height, int width, int nByteDepth);
 
 struct CamDevice { 
 	std::wstring name;

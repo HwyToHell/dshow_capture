@@ -5,7 +5,8 @@
 #include <process.h> // threading
 #include <string>
 
-void showImg(void* p);
+
+DWORD WINAPI showImg(void* p);
 
 
 void createImg(cv::Scalar color, int width, int height) {
@@ -14,10 +15,11 @@ void createImg(cv::Scalar color, int width, int height) {
 	return;
 }
 
-void startStopCtrl(void* p) {
+HANDLE startStopCtrl(void* p) {
 	using namespace std;
 	CamInput* pCamInput = (CamInput*)p;
 	bool exit = false, running = false;
+	HANDLE hShowImgThread = nullptr;
 	string cmd; 
 	cout << "press enter to start / stop video, hit e to exit" << endl; 
 	while (!exit) {
@@ -32,7 +34,8 @@ void startStopCtrl(void* p) {
 			}
 		} else { // not running
 			cout << "video started" << endl;
-			_beginthread(showImg, 0, (void*)pCamInput);
+			//_beginthread(showImg, 0, (void*)pCamInput);
+			hShowImgThread = CreateThread(nullptr, 0, showImg, (LPVOID)pCamInput, 0, 0);
 			if (pCamInput->runGraph())
 				running = true;
 			else {
@@ -43,12 +46,11 @@ void startStopCtrl(void* p) {
 		if (cmd.size() > 0 && cmd.front() == 'e')
 			exit = true;
 	} // end while
-
-//	_endthread();
+	return hShowImgThread;
 }
 
 
-void getCam(void* p) {
+DWORD WINAPI getCam(void* p) {
 	using namespace std;	
 	//CamInput camInput;
 	//CamInput* pCamInput = &camInput;
@@ -71,15 +73,19 @@ void getCam(void* p) {
 		cout << "resolution not set" << endl;
 		
 	// con input for starting and stopping the graph
-	startStopCtrl(pCamInput);
+	HANDLE hShowImageThread = startStopCtrl(pCamInput);
 	cout << "finished" << endl;
+	
+	DWORD dwRet = WaitForSingleObject(hShowImageThread, INFINITE);
+	if (dwRet != WAIT_OBJECT_0)
+		cout << "WaitForSingleObject: failure code " << dwRet << endl; 
 
 	delete pCamInput;
-	_endthread();
+	ExitThread(0); // getCam Thread
 }
 
 
-void showImg(void* p) {
+DWORD WINAPI showImg(void* p) {
 	CamInput* pCamInput = (CamInput*)p;
 	Sleep(2000);
 	
@@ -94,9 +100,8 @@ void showImg(void* p) {
 			break;
 		}
 	}
-
-	_endthread();
-	return;
+	ExitThread(0);
+	return 0;
 }
 
 
@@ -107,13 +112,20 @@ int main (int argc, char* argv[]) {
 	cout << "sgColorImg" << endl;
 	cout << sgColorImg << endl << endl;
 	cv::imshow("single color image", sgColorImg);
-	*/
+
 	cv::Mat image = cv::imread("yyy_grab.jpg");
 	cv::imshow("grabbed frame", image);
+	*/
 
+	// TODO delete _beginthread(getCam, 0, nullptr);
+	HANDLE hCamThread = CreateThread(nullptr, 0, getCam, nullptr, 0, 0);
+	DWORD dwRet = WaitForSingleObject(hCamThread, INFINITE);
 
-	_beginthread(getCam, 0, nullptr);
+	if (dwRet != WAIT_OBJECT_0)
+		cout << "WaitForSingleObject: failure code " << dwRet << endl; 
 
-	cv::waitKey(0);
+	cout << "Press <enter> to exit" << endl;
+	string str;
+	getline(cin, str);
 	return 0;
 }

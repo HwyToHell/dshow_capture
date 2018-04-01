@@ -64,6 +64,7 @@ public:
 	int enumerateStreamCaps();
 	double get(int propID);
 	bool initGraph(int capDeviceNum);
+	bool isGraphRunning();
 	void printStreamCaps();
 	bool read(cv::Mat& bitmap);
 	bool runGraph();

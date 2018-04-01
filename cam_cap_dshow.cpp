@@ -635,6 +635,27 @@ bool CamInput::initGraph(int capDeviceNum) {
 	return true;
 }
 
+bool CamInput::isGraphRunning() {
+	using namespace std;
+	FILTER_STATE filterState = State_Stopped;
+
+	if (m_mediaControl) {
+		HRESULT hr = m_mediaControl->GetState(100, (OAFilterState*)&filterState);
+		if(FAILED(hr)) {
+			cerr << "isGraphRunning: cannot get filter state!" << endl;   
+			throw "com error";
+		} else { // HRESULT == S_OK
+			if (filterState == State_Running)
+				return true;
+			else
+				return false;
+		}
+	} else { // media control member not initialized yet
+		return false;
+	}
+}
+
+
 void CamInput::printStreamCaps() {
 	using namespace std;
 	for (size_t n = 0; n < m_streamCapsArray.size(); ++n) {
@@ -651,9 +672,9 @@ bool CamInput::read(cv::Mat& bitmap) {
 	int width = (int)get(CV_CAP_PROP_FRAME_WIDTH);
 	int height = (int)get(CV_CAP_PROP_FRAME_HEIGHT);
 
-	// wait max 200ms (=5 fps) for new frame
+	// wait max 1000ms (= 1 fps) for new frame
 	HANDLE hNewFrameEvent = m_sGrabCallBack->getNewFrameEventHandle();
-	DWORD dwStatus = WaitForSingleObject(hNewFrameEvent, 200); 
+	DWORD dwStatus = WaitForSingleObject(hNewFrameEvent, 2000); 
 
 	// assign buffer to mat if new frame available
 	if (dwStatus == WAIT_OBJECT_0) {

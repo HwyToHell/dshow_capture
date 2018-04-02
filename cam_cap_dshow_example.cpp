@@ -81,7 +81,7 @@ DWORD WINAPI first_getCam(void* p) {
 	int iDevices = pCamInput->enumerateDevices();
 
 	// init graph with first device
-	bool success = pCamInput->initGraph(0);
+	bool success = pCamInput->setDevice(0);
 
 	// check capabilities of capture device in graph
 	int iCaps = pCamInput->enumerateStreamCaps();
@@ -114,7 +114,7 @@ struct CamThreadPara {
 };
 
 
-DWORD WINAPI getCam(void* p) {
+DWORD WINAPI second_getCam(void* p) {
 	using namespace std;	
 
 	CamThreadPara* pCamThreadPara = (CamThreadPara*)p;
@@ -124,7 +124,7 @@ DWORD WINAPI getCam(void* p) {
 	int iDevices = pCamInput->enumerateDevices();
 
 	// init graph with first device
-	bool success = pCamInput->initGraph(0);
+	bool success = pCamInput->setDevice(0);
 
 	// check capabilities of capture device in graph
 	int iCaps = pCamInput->enumerateStreamCaps();
@@ -140,7 +140,7 @@ DWORD WINAPI getCam(void* p) {
 	// con input for starting and stopping the graph
 	pCamInput->runGraph();
 
-	prnTime("graph started");
+	//prnTime("graph started");
 
 	// check if graph running and signal event "filter running"
 	HANDLE hEventFilterRunning = pCamThreadPara->evFilterRunning;
@@ -157,7 +157,7 @@ DWORD WINAPI getCam(void* p) {
 		}
 	}
 
-	prnTime("graph is running");
+	//prnTime("graph is running");
 
 	// wait for event "destruct cam input"
 	HANDLE hEventDestructCam = pCamThreadPara->evDestructCam;
@@ -197,7 +197,7 @@ int first_main (int argc, char* argv[]) {
 	using namespace std;
 
 	// TODO 
-	HANDLE hCamThread = CreateThread(nullptr, 0, getCam, nullptr, 0, 0);
+	HANDLE hCamThread = CreateThread(nullptr, 0, first_getCam, nullptr, 0, 0);
 
 	DWORD dwRet = WaitForSingleObject(hCamThread, INFINITE);
 
@@ -212,10 +212,10 @@ int first_main (int argc, char* argv[]) {
 
 
 
-int main (int argc, char* argv[]) {
+int second_main (int argc, char* argv[]) {
 	using namespace std;
 
-	prnTime("main started");
+	//prnTime("main started");
 
 	CamThreadPara camThreadPara;
 	CamThreadPara* pCamThreadPara = &camThreadPara;
@@ -224,9 +224,9 @@ int main (int argc, char* argv[]) {
 	camThreadPara.evDestructCam = CreateEvent(nullptr, true, false, L"destruct cam");
 
 	// thread for setting up cam 
-	HANDLE hCamThread = CreateThread(nullptr, 0, getCam, pCamThreadPara, 0, 0);
+	HANDLE hCamThread = CreateThread(nullptr, 0, second_getCam, pCamThreadPara, 0, 0);
 
-	prnTime("thread 1 created");
+	//prnTime("thread 1 created");
 
 	DWORD dwRet = WaitForSingleObject(	pCamThreadPara->evFilterRunning, INFINITE);
 	if (dwRet != WAIT_OBJECT_0) {
@@ -251,6 +251,111 @@ int main (int argc, char* argv[]) {
 	dwRet = WaitForSingleObject(hCamThread, INFINITE);
 	if (dwRet != WAIT_OBJECT_0)
 		cout << "WaitForSingleObject: failure code " << dwRet << endl; 
+
+	cout << "Press <enter> to exit" << endl;
+	string str;
+	getline(cin, str);
+	return 0;
+}
+
+DWORD WINAPI initCam(void* p) {
+	using namespace std;
+	CamInput* pCamInput = (CamInput*)p;
+	
+	// init com, once per thread!
+	HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    if(FAILED(hr)) {
+        cerr << "initCam: cannot initialize com!" << endl;   
+		throw "com error";
+    }
+
+	// initialize filter graph
+	bool success = pCamInput->setDevice(0);
+
+	// check capabilities of capture device in graph
+	int iCaps = pCamInput->enumerateStreamCaps();
+	pCamInput->printStreamCaps();
+	double height = 0, width = 0;
+	if (pCamInput->setResolution(6)) {
+		width = pCamInput->get(CV_CAP_PROP_FRAME_WIDTH);
+		height = pCamInput->get(CV_CAP_PROP_FRAME_HEIGHT);
+		cout << "actual resolution: " << width << "x" << height << endl;
+	} else
+		cout << "resolution not set" << endl;
+		
+	// run graph
+	pCamInput->runGraph();
+
+	// check if graph running and signal event "filter running"
+	DWORD exitCode = 0xFFFFFFFF;
+	for (int initCnt = 1; initCnt < 11; ++initCnt) {
+		cout << initCnt * 100 << " ms: "; 
+		if (pCamInput->isGraphRunning()) {
+			cout << "graph running" << endl;
+			exitCode = 0;
+			break;
+		} else {
+			cout << "graph not running yet" << endl;
+			exitCode = 0xFFFFFFFF;
+		}
+	}
+
+	//prnTime("graph is running");
+	CoUninitialize();
+	ExitThread(exitCode);
+	return 0;
+}
+
+int main (int argc, char* argv[]) {
+	using namespace std;
+
+	CamInput* pCamInput = new CamInput;
+
+	int iDevices = pCamInput->enumerateDevices();
+
+	// init graph with first device in thread 1
+	//HANDLE hInitThread = CreateThread(nullptr, 0, initCam, pCamInput, 0, 0);
+		// initialize filter graph
+	bool success = pCamInput->setDevice(0);
+
+	// print capabilities of capture device in graph
+	int nCaps = pCamInput->enumerateStreamCaps();
+	for (int iCap = 0; iCap < nCaps; ++iCap) {
+		cv::Size frameSize = pCamInput->getResolution(iCap);
+		cout << iCap << " resolution: " << frameSize.width << "x" << frameSize.height << endl;
+	}
+
+	double height = 0, width = 0;
+	if (pCamInput->setResolution(6)) {
+		width = pCamInput->get(CV_CAP_PROP_FRAME_WIDTH);
+		height = pCamInput->get(CV_CAP_PROP_FRAME_HEIGHT);
+		cout << "actual resolution: " << width << "x" << height << endl;
+	} else
+		cout << "resolution not set" << endl;
+		
+	// start graph
+	success = pCamInput->runGraph();
+	
+	// check, if graph is running
+	if (pCamInput->isGraphRunning()) {
+		cout << "graph running" << endl;
+	} else {
+		cout << "graph not running yet" << endl;
+	}
+
+
+	cv::Mat image;
+	while (pCamInput->read(image)) {
+		cv::imshow("grabbed image", image);
+
+		if (cv::waitKey(10) == 27) 	{
+			std::cout << "ESC pressed -> end video processing" << std::endl;
+			break;
+		}
+	}
+
+	//success = pCamInput->stopGraph(); // not necessary as stopGraph() called in D'tor
+	delete pCamInput;
 
 	cout << "Press <enter> to exit" << endl;
 	string str;

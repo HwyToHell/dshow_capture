@@ -66,7 +66,7 @@ void getCam(void* p) {
 	int iDevices = pCamInput->enumerateDevices();
 
 	// init graph with first device
-	bool success = pCamInput->initGraph(0);
+	bool success = pCamInput->setDevice(0);
 
 	// check capabilities of capture device in graph
 	int iCaps = pCamInput->enumerateStreamCaps();

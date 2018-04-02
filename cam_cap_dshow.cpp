@@ -1,8 +1,14 @@
-// google-style order
+/// usage: instantiate CamCapture in heap
+/// enumerate camDevices and streamCaps (containing Resolution)
+/// setDevice(), setResolution(), startGraph()
+/// read() for capturing frames
+
+
 #include "cam_cap_dshow.h"
 
 #include <algorithm>
-#include <cstring> // memcpy
+#include <cstring>		// memcpy
+#include <iomanip>		// setprecision
 #include <iostream>
 //#include <string>:	"cam_cap_dshow.h"
 //#include <vector>:	"cam_cap_dshow.h"
@@ -10,42 +16,79 @@
 //#include <DShow.h>:	"cam_cap_dshow.h"
 
 
+///////////////////////////////////////////////////////////////////////////////
+// Running Object Table helper fcns
+// for visualization of filter graph configuration with graphedt tool
+///////////////////////////////////////////////////////////////////////////////
+// add filter graph to running object table 
+bool addToRot(IUnknown* pUnkGraph, DWORD* pdwRegister) {
+	using namespace std;
 
-// encapsulate in classes
-/*	vidCapDshow -> replaces opencvs VideoCapture
-	videoDevice: webcams
-	videoInput: mehrere devices, filtergraph
-*/
+	IMoniker* pMoniker = nullptr;
+	IRunningObjectTable* pRot = nullptr;
+	HRESULT hr = GetRunningObjectTable(0, &pRot);
+	if (FAILED(hr)) {
+		cerr << "addToRot: cannot access running object table!" << endl;
+		pRot->Release();
+		throw "com error";
+		return false;
+	}
 
-// enumerate device capabilities
+	const size_t strLen = 256;
+	WCHAR wsz[strLen];
+	swprintf_s(wsz, strLen, L"FilterGraph %08p pid %08x", (DWORD_PTR)pUnkGraph, GetCurrentProcessId() );
+	hr = CreateItemMoniker(L"!", wsz, &pMoniker);
+	if (FAILED(hr)) {
+		cerr << "addToRot: cannot create item moniker!" << endl;
+		pRot->Release();
+		pMoniker->Release();
+		throw "com error";
+		return false;
+	}
 
-// select capability (frame size)
+	hr = pRot->Register(ROTFLAGS_REGISTRATIONKEEPSALIVE, pUnkGraph, pMoniker, pdwRegister);
+	if (FAILED(hr)) {
+		cerr << "addToRot: cannot register graph!" << endl;
+		pRot->Release();
+		pMoniker->Release();
+		throw "com error";
+		return false;
+	}
 
-// create 
-
-// add filter graph to running object table for visualization with graphedt
-bool addToRot(IUnknown* pUnkGraph, DWORD* pdwRegister);
+	pMoniker->Release();
+	pRot->Release();
+	return true;
+}
 
 // remove filter graph from running object table
-bool removeFromRot(DWORD dwRegister);
+bool removeFromRot(DWORD dwRegister) {
+    IRunningObjectTable *pRot = nullptr;
+
+    if (SUCCEEDED(GetRunningObjectTable(0, &pRot))) {
+        pRot->Revoke(dwRegister);
+        pRot->Release();
+		return true;
+    } else {
+		return false;
+	}
+}
 
 
+///////////////////////////////////////////////////////////////////////////////
+// CamInput
+// implementation of callback fcn invoked from sample grabber filter
+///////////////////////////////////////////////////////////////////////////////
 class SampleGrabberCallback : public ISampleGrabberCB {
 private:
-	ULONG	m_cntRef;
-	BYTE*	m_bitmap; // TODO provide this bitmap array from cv application
-	long	m_height;
-	long	m_width;
-	int		m_depth;
-	BYTE*	m_bufferMediaSample;
-
-	LARGE_INTEGER m_lastTime;
-	
-	int m_counter;
-	long long m_avgTime, m_sumTime;
-	long long m_avgCpy, m_sumCpy;
-	CRITICAL_SECTION m_lockBufferCopy;
-	HANDLE m_newFrameEvent;
+	ULONG				m_cntRef;
+	BYTE*				m_bitmap; // TODO provide this bitmap array from cv application
+	long				m_height;
+	long				m_width;
+	int					m_depth;
+	BYTE*				m_bufferMediaSample;
+	CRITICAL_SECTION	m_lockBufferCopy;
+	HANDLE				m_newFrameEvent;
+	bool				m_timeMeasurement;
 
 public:
 	SampleGrabberCallback();
@@ -62,11 +105,9 @@ public:
 };
 
 SampleGrabberCallback::SampleGrabberCallback() {
-	m_counter = 0;
-	m_avgTime = m_sumTime = 0;
-	m_avgCpy = m_sumCpy = 0;
 	InitializeCriticalSection(&m_lockBufferCopy);
 	m_newFrameEvent = CreateEvent(nullptr, true, false, L"new frame");
+	m_timeMeasurement = true;
 }
 
 SampleGrabberCallback::~SampleGrabberCallback() {
@@ -100,30 +141,39 @@ HRESULT STDMETHODCALLTYPE SampleGrabberCallback::QueryInterface(REFIID riid, voi
 		return E_NOINTERFACE;
 }
 
-
+// method not used
 STDMETHODIMP SampleGrabberCallback::BufferCB(double SampleTime, BYTE* pBuffer, long BufferLen) {
 	return E_NOTIMPL;
 }
 
+// copy frame buffer with horizontal flip 
+void cpyFlipHori(BYTE dst[], const BYTE src[], int height, int width, int nByteDepth) {
+	int rowLen = width * nByteDepth;
+	for (int i_row = 0; i_row < height; ++i_row) {
+		memcpy(&dst[i_row * rowLen], &src[(height - i_row - 1) * rowLen], rowLen);
+	}
+	return;
+}
+
+// method is called each time a new media sample arrives
 STDMETHODIMP SampleGrabberCallback::SampleCB(double SampleTime, IMediaSample* pSample) {
 	using namespace std;
 	
 	// performance counting
-	LARGE_INTEGER lBefore, lAfter, lNewTime, lMicroSecElapsed;
-	LARGE_INTEGER lFrequency;
+	static bool init = false;
+	static int counter = 0;
+	static double sample_time_max_ms = 0, sample_time_min_ms = 0;
+	static double copy_time_sum = 0, sample_time_sum = 0;
+	static LARGE_INTEGER lPrevious = { 0 };
+	LARGE_INTEGER lFreq, lActual, lAfterCpy; 
 
-	// microsec since last callback
-	BOOL success = QueryPerformanceFrequency(&lFrequency);
-	success = QueryPerformanceCounter(&lNewTime);
 
-	lMicroSecElapsed.QuadPart = lNewTime.QuadPart - m_lastTime.QuadPart;
-	lMicroSecElapsed.QuadPart *= 1000000; 		// ticks per second
-	lMicroSecElapsed.QuadPart /= lFrequency.QuadPart;
-	m_lastTime = lNewTime;
+	// ticks since last callback
+	QueryPerformanceFrequency(&lFreq);
+	double freq = (double)lFreq.QuadPart;
+	QueryPerformanceCounter(&lActual);
 
-	success = QueryPerformanceCounter(&lBefore);
-
-	// copy pixels
+	// get pointer to pixel buffer to copy from
 	long bufferSize = 0;
 	HRESULT hr = pSample->GetPointer(&m_bufferMediaSample);
     if(FAILED(hr)) {
@@ -133,35 +183,52 @@ STDMETHODIMP SampleGrabberCallback::SampleCB(double SampleTime, IMediaSample* pS
 		bufferSize = pSample->GetSize();
 	}
 
+	// copy to bitmap buffer, flip horizontally and raise new frame event
 	EnterCriticalSection(&m_lockBufferCopy);
-	//memcpy(m_bitmap, m_bufferMediaSample, bufferSize);
-	// flip horizontally
+	// copy without flipping: memcpy(m_bitmap, m_bufferMediaSample, bufferSize);
 	cpyFlipHori(m_bitmap, m_bufferMediaSample, (int)m_height, (int)m_width, m_depth);
 	LeaveCriticalSection(&m_lockBufferCopy);
 	SetEvent(m_newFrameEvent);
 
-	success = QueryPerformanceCounter(&lAfter);
-	long long lDiff = (lAfter.QuadPart - lBefore.QuadPart) * 1000000 / lFrequency.QuadPart;
+	// ticks after copying frame buffer
+	QueryPerformanceCounter(&lAfterCpy);
 
-	++m_counter;
-	// DEBUG printout time measurements
-	if (m_counter > 1) {
+	if (m_timeMeasurement) {
+		// copy time
+		double copy_time_ms = (double)(lAfterCpy.QuadPart - lActual.QuadPart) * 1000 / freq;
+		// sample time
+		double sample_time_ms = (double)(lActual.QuadPart - lPrevious.QuadPart) * 1000 / freq;
 
-		// sample time for grabber
-		m_sumTime += lMicroSecElapsed.QuadPart;
-		m_avgTime = m_sumTime / m_counter;
+		if (!init) { // skip first calculation in order to populate previous time
+			init = true;
+		} else { // normal calculation after init
+			copy_time_sum += copy_time_ms;
+			sample_time_sum += sample_time_ms;
 
-		// time for copying frame buffer
-		m_sumCpy += lDiff;
-		m_avgCpy = m_sumCpy / m_counter;
-	}
+			sample_time_max_ms = (sample_time_max_ms == 0) ? sample_time_ms : sample_time_max_ms;  
+			sample_time_min_ms = (sample_time_min_ms == 0) ? sample_time_ms : sample_time_min_ms;
+			sample_time_max_ms = (sample_time_ms > sample_time_max_ms) ? sample_time_ms : sample_time_max_ms; 
+			sample_time_min_ms = (sample_time_ms < sample_time_min_ms) ? sample_time_ms : sample_time_min_ms;
+	
+			++counter;
+			if (counter >= 100) {
+				double avg_sample = sample_time_sum / counter;
+				cout << fixed << setprecision(1)
+					<< "sample time in ms: avg: " << avg_sample 
+					<< ", min: " << sample_time_min_ms 
+					<< ", max: " << sample_time_max_ms << endl;
+				double avg_cpy = copy_time_sum / counter;
+				cout << "bufferSize: " << bufferSize;
+				cout << fixed << setprecision(3) 
+					<< ", time to copy frame buffer in ms: " <<  avg_cpy << endl;
 
-	if (m_counter % 100 == 0) {
-		cout << "average sample time in ms: " << (double)m_avgTime / 1000 
-			<< " presentation time: " << SampleTime << endl;
-		cout << "time to copy frame buffer in ms: " << (double)m_avgCpy / 1000 << endl;
-		cout << "bufferSize: " << bufferSize << endl;
-	}
+				counter = 0;
+				copy_time_sum = sample_time_sum = 0;
+				sample_time_max_ms = 0, sample_time_min_ms = 0;
+			}
+		}
+		lPrevious = lActual;
+	} // end_if m_timeMeasurement
 
 	return 0;
 }
@@ -187,30 +254,14 @@ bool SampleGrabberCallback::setBitmapSize(long height, long width, int nByteDept
 	}
 }
 
-// TODO: delete
-void cpyFlipHori_slow(BYTE dst[], const BYTE src[], long height, long width, int nByteDepth) {
-	long rowLen = width * nByteDepth;
-	for (long i_row = 0; i_row < height; ++i_row) {
-		for (long n_col = 0;  n_col < rowLen; ++n_col) {
-			int dst_idx = i_row * rowLen + n_col;
-			int src_idx = (height - i_row - 1) * rowLen + n_col;
-			dst[dst_idx] = src[src_idx];
-		}
-	}
-	return;
-}
 
-void cpyFlipHori(BYTE dst[], const BYTE src[], int height, int width, int nByteDepth) {
-	int rowLen = width * nByteDepth;
-	for (int i_row = 0; i_row < height; ++i_row) {
-		memcpy(&dst[i_row * rowLen], &src[(height - i_row - 1) * rowLen], rowLen);
-	}
-	return;
-}
-
-
+///////////////////////////////////////////////////////////////////////////////
+// CamInput
+// replacement for cv::VideoCapture with ability to set camera frame size
+///////////////////////////////////////////////////////////////////////////////
 CamInput::CamInput() {
 	using namespace std;
+	
 	// init com
 	HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     if(FAILED(hr)) {
@@ -232,18 +283,21 @@ CamInput::CamInput() {
 }
 
 
+// helper fcn for releasing monikers for cam devices in D'tor
 void releaseMoniker(CamDevice& camDevice) {
 	camDevice.pMoniker->Release();
 	return;
 }
 
-
 CamInput::~CamInput() {
+	// stop graph, if still running
+	if (&CamInput::isGraphRunning) {
+		m_mediaControl->Stop();
+	}
+
 	// unregister from running object table
 	if (!removeFromRot(m_registerRot))
 		throw "com error";
-
-	// delete sample grabber callback
 
 	// release moniker for each cam device
 	std::for_each(m_deviceArray.begin(), m_deviceArray.end(), releaseMoniker);
@@ -265,22 +319,22 @@ CamInput::~CamInput() {
 }
 
 
-// create and add capture filter to graph
-bool CamInput::addCamSrcFilter(int capDeviceNum, IGraphBuilder* pGraph) {
+// source filter (camera capture), add to filter graph
+bool CamInput::addCamSrcFilter(int deviceID, IGraphBuilder* pGraph) {
 	using namespace std;
 	IMoniker* pMoniker = nullptr;
 	
 	// deviceNumber out of range
-	if (capDeviceNum >= (int)m_deviceArray.size())
+	if (deviceID >= (int)m_deviceArray.size())
 		return false;
 	else
-		pMoniker = m_deviceArray.at(capDeviceNum).pMoniker;
+		pMoniker = m_deviceArray.at(deviceID).pMoniker;
 
 	// create capture filter object
 	HRESULT hr = pMoniker->BindToObject(0,0,IID_IBaseFilter, (void**)&m_camSrcFilter);
 	if (FAILED(hr)) {
 		cerr << "addCapFilter: cannot access video capture device "
-			<< capDeviceNum << endl;  
+			<< deviceID << endl;  
 		m_camSrcFilter->Release();
 		throw "com error";
 		return false;
@@ -298,7 +352,9 @@ bool CamInput::addCamSrcFilter(int capDeviceNum, IGraphBuilder* pGraph) {
 	return true;
 }
 
-// create and add sample grabber to graph
+
+// intermediate sample grabber filter (between capture and renderer)
+// crate and add to filter graph
 bool CamInput::addGrabFilter(IGraphBuilder* pGraph) {
 	using namespace std;
 
@@ -335,6 +391,7 @@ bool CamInput::addGrabFilter(IGraphBuilder* pGraph) {
 }
 
 
+// sink filter for sample grabber filter, add to filter graph
 bool CamInput::addNullRenderFilter(IGraphBuilder* pGraph) {
 	using namespace std;
 
@@ -361,7 +418,7 @@ bool CamInput::addNullRenderFilter(IGraphBuilder* pGraph) {
 }
 
 
-// enumerate devices
+// enumerate camera devices and get their friendly names
 int CamInput::enumerateDevices() {
 	using namespace std;
 	
@@ -440,6 +497,7 @@ int CamInput::enumerateDevices() {
 }
 
 
+// helper fcn to filter stream capabilities for uncompressed media types
 bool isUncompressed(GUID mediaSubtype) {
 	if (mediaSubtype == MEDIASUBTYPE_RGB24) 
 		return true;
@@ -454,6 +512,8 @@ bool isUncompressed(GUID mediaSubtype) {
 	return false;
 }
 
+
+// stream capabilities contain possible frame sizes (VIDEOINFOHEADER -> BITMAPINFOHEADER)
 int CamInput::enumerateStreamCaps() {
 	using namespace std;
 	
@@ -503,6 +563,8 @@ int CamInput::enumerateStreamCaps() {
 }
 
 
+// for cv::VideoCapture::get() compatibility
+// properties CV_CAP_PROP_FRAME_WIDTH and CV_CAP_PROP_FRAME_HEIGHT implemented
 double CamInput::get(int propID) {
 	using namespace std;	
 	
@@ -539,7 +601,30 @@ double CamInput::get(int propID) {
 }
 
 
-bool CamInput::initGraph(int capDeviceNum) {
+// returns friendly name of selected camera device
+std::wstring CamInput::getDevice(int deviceID) {
+	if (deviceID < 0 || deviceID >= (int)m_deviceArray.size())
+		return std::wstring(L"ID out of range");
+	else // ID within range
+		return m_deviceArray.at(deviceID).name;
+}
+
+
+// returns rect of frame size width x height
+cv::Size CamInput::getResolution(int capabilityID) {
+	cv::Size frameSize(0,0);
+	if (capabilityID < 0 || capabilityID >= (int)m_streamCapsArray.size())
+		frameSize.width = frameSize.height = 0;
+	else { // ID within range
+		frameSize.width = m_streamCapsArray.at(capabilityID).bmiHeader.biWidth;
+		frameSize.height = m_streamCapsArray.at(capabilityID).bmiHeader.biHeight;
+	}
+	return frameSize;
+}
+
+
+// set camera device, build and initialize filter graph
+bool CamInput::setDevice(int deviceID) {
 	using namespace std;
 
 	// create capture graph builder
@@ -549,7 +634,7 @@ bool CamInput::initGraph(int capDeviceNum) {
 		IID_ICaptureGraphBuilder2,
 		(void**)&m_captureBuilder); // released in ~CamInput
 	if (FAILED(hr)) {
-		cerr << "initGraph: cannot instantiate capture graph builder" << endl;
+		cerr << "setDevice: cannot instantiate capture graph builder" << endl;
 		throw "com error";
 		return false;
 	}
@@ -561,28 +646,28 @@ bool CamInput::initGraph(int capDeviceNum) {
             IID_IGraphBuilder,
 			(void**)&m_graphBuilder); // released in ~CamInput
 	if (FAILED(hr)) {
-		cerr << "initGraph: cannot instantiate filter graph" << endl;
+		cerr << "setDevice: cannot instantiate filter graph" << endl;
 		throw "com error";
 		return false;
 	}
 	hr = m_captureBuilder->SetFiltergraph(m_graphBuilder);
 	if (FAILED(hr)) {
-		cerr << "initGraph: cannot set filter graph" << endl;
+		cerr << "setDevice: cannot set filter graph" << endl;
 		throw "com error";
 		return false;
 	}
 
 	// create and add filters to graph
-	if ( !addCamSrcFilter(capDeviceNum, m_graphBuilder) ) {
-		cerr << "initGraph: cannot add source filter" << endl;
+	if ( !addCamSrcFilter(deviceID, m_graphBuilder) ) {
+		cerr << "setDevice: cannot add source filter" << endl;
 		return false;
 	}
 	if ( !addGrabFilter(m_graphBuilder) ) {
-		cerr << "initGraph: cannot add grab filter" << endl;
+		cerr << "setDevice: cannot add grab filter" << endl;
 		return false;
 	}
 	if ( !addNullRenderFilter(m_graphBuilder) ) {
-		cerr << "initGraph: cannot add sink filter" << endl;
+		cerr << "setDevice: cannot add sink filter" << endl;
 		return false;
 	}
 
@@ -598,10 +683,10 @@ bool CamInput::initGraph(int capDeviceNum) {
 
 	// connect graph by using RenderStream
 	hr = m_captureBuilder->RenderStream(&PIN_CATEGORY_CAPTURE,
-		&MEDIATYPE_Video, m_camSrcFilter, m_grabFilter, nullptr);
-		//&MEDIATYPE_Video, m_camSrcFilter, m_grabFilter, m_renderFilter);
+		//&MEDIATYPE_Video, m_camSrcFilter, m_grabFilter, nullptr);
+		&MEDIATYPE_Video, m_camSrcFilter, m_grabFilter, m_renderFilter);
 	if (FAILED(hr)) {
-		cerr << "initGraph: cannot connect filters" << endl;
+		cerr << "setDevice: cannot connect filters" << endl;
 		throw "com error";
 		return false;
 	}
@@ -609,7 +694,7 @@ bool CamInput::initGraph(int capDeviceNum) {
 	// media control to run / stop filter graph
 	hr = m_graphBuilder->QueryInterface(IID_IMediaControl, (void**)&m_mediaControl);
 	if (FAILED(hr)) {
-		cerr << "initGraph: cannot query media interface" << endl;
+		cerr << "setDevice: cannot query media interface" << endl;
 		throw "com error";
 		return false;
 	}
@@ -617,7 +702,7 @@ bool CamInput::initGraph(int capDeviceNum) {
 	// video window
 	hr =  m_graphBuilder->QueryInterface(IID_IVideoWindow, (void**) &m_videoWindow);
     if (FAILED(hr)) {
-		cerr << "initGraph: cannot instantiate video window" << endl;
+		cerr << "setDevice: cannot instantiate video window" << endl;
 		throw "com error";
 		return false;
 	}
@@ -635,6 +720,8 @@ bool CamInput::initGraph(int capDeviceNum) {
 	return true;
 }
 
+
+// test if filter graph is running and rendering data
 bool CamInput::isGraphRunning() {
 	using namespace std;
 	FILTER_STATE filterState = State_Stopped;
@@ -656,6 +743,7 @@ bool CamInput::isGraphRunning() {
 }
 
 
+// TODO delete, implement in application by calling getResolution(capabilityID)
 void CamInput::printStreamCaps() {
 	using namespace std;
 	for (size_t n = 0; n < m_streamCapsArray.size(); ++n) {
@@ -666,13 +754,16 @@ void CamInput::printStreamCaps() {
 }
 
 
+// cv::VideoCapture::read() compatible
+// check isGraphRunning before calling this function
+// TODO implement dropped frames counter (if application is not fast enough)
 bool CamInput::read(cv::Mat& bitmap) {
 	using namespace cv;
 	using namespace std;
 	int width = (int)get(CV_CAP_PROP_FRAME_WIDTH);
 	int height = (int)get(CV_CAP_PROP_FRAME_HEIGHT);
 
-	// wait max 1000ms (= 1 fps) for new frame
+	// wait max 2000ms (= 0.5 fps) for new frame
 	HANDLE hNewFrameEvent = m_sGrabCallBack->getNewFrameEventHandle();
 	DWORD dwStatus = WaitForSingleObject(hNewFrameEvent, 2000); 
 
@@ -700,6 +791,8 @@ bool CamInput::read(cv::Mat& bitmap) {
 	}
 }
 
+
+// start capturing frames
 bool CamInput::runGraph() {
 	using namespace std;
 	HRESULT hr = m_mediaControl->Run();
@@ -712,6 +805,9 @@ bool CamInput::runGraph() {
 	}
 }
 
+
+// set camera resolution
+// filter graph must be stopped!
 bool CamInput::setResolution(int capabilityID) {
 	using namespace std;
 	
@@ -745,8 +841,7 @@ bool CamInput::setResolution(int capabilityID) {
 }
 
 
-
-
+// stop capturing frames
 bool CamInput::stopGraph() {
 	using namespace std;
 	HRESULT hr = m_mediaControl->Stop();
@@ -756,59 +851,6 @@ bool CamInput::stopGraph() {
 		return false;
 	} else {
 		return true;
-	}
-}
-
-
-bool addToRot(IUnknown* pUnkGraph, DWORD* pdwRegister) {
-	using namespace std;
-
-	IMoniker* pMoniker = nullptr;
-	IRunningObjectTable* pRot = nullptr;
-	HRESULT hr = GetRunningObjectTable(0, &pRot);
-	if (FAILED(hr)) {
-		cerr << "addToRot: cannot access running object table!" << endl;
-		pRot->Release();
-		throw "com error";
-		return false;
-	}
-
-	const size_t strLen = 256;
-	WCHAR wsz[strLen];
-	swprintf_s(wsz, strLen, L"FilterGraph %08p pid %08x", (DWORD_PTR)pUnkGraph, GetCurrentProcessId() );
-	hr = CreateItemMoniker(L"!", wsz, &pMoniker);
-	if (FAILED(hr)) {
-		cerr << "addToRot: cannot create item moniker!" << endl;
-		pRot->Release();
-		pMoniker->Release();
-		throw "com error";
-		return false;
-	}
-
-	hr = pRot->Register(ROTFLAGS_REGISTRATIONKEEPSALIVE, pUnkGraph, pMoniker, pdwRegister);
-	if (FAILED(hr)) {
-		cerr << "addToRot: cannot register graph!" << endl;
-		pRot->Release();
-		pMoniker->Release();
-		throw "com error";
-		return false;
-	}
-
-	pMoniker->Release();
-	pRot->Release();
-	return true;
-}
-
-
-bool removeFromRot(DWORD dwRegister) {
-    IRunningObjectTable *pRot = nullptr;
-
-    if (SUCCEEDED(GetRunningObjectTable(0, &pRot))) {
-        pRot->Revoke(dwRegister);
-        pRot->Release();
-		return true;
-    } else {
-		return false;
 	}
 }
 
